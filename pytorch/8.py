@@ -6,11 +6,13 @@ from torchvision import transforms
 import matplotlib.pyplot as plt
 
 # ----------------------------------------------------------------set_params
-save_path = "./model_pt/minst_best.pt"
+save_path = "./model_pt/minst_best8.pt"
 batch_size = 64
-workers = 4
-patience = 12
+workers = 6
+patience = 15
 epochs = 100
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # ----------------------------------------------------------------datasets
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -83,91 +85,90 @@ def save_plt(x,y,x_title:str = "x", y_title:str = "y", title: str = "图", save_
         )
         print(f"图片已保存至：{save_path}")
 
-# ----------------------------------------------------------------models
-class Model(torch.nn.Module):
+class Conv_Model(torch.nn.Module):
     def __init__(self):
-        super(Model, self).__init__()
-        self.l1 = torch.nn.Linear(784,512)
-        self.l2 = torch.nn.Linear(512,256)
-        self.l3 = torch.nn.Linear(256,128)
-        self.l4 = torch.nn.Linear(128,64)
-        self.l5 = torch.nn.Linear(64, 10)       # 最终给到10分类
+        super().__init__()
+        self.conv1 = torch.nn.Conv2d(in_channels=1, out_channels=5,kernel_size=7,padding=1)
+        self.maxpool = torch.nn.MaxPool2d(kernel_size=2)
+        self.conv2 = torch.nn.Conv2d(in_channels=5,out_channels=10,kernel_size=5,padding=1)
+        self.conv3 = torch.nn.Conv2d(in_channels=10,out_channels=20,kernel_size=3)
+        self.linear1 = torch.nn.Linear(in_features=320, out_features=40)
+        self.linear2 = torch.nn.Linear(in_features=40, out_features=10)
 
-    def forward(self,x):    # 输入 n * 1 * 28 * 28
-        x = x.view(-1, 784)     # 降维到1维, -1表示自适应计算, 784列
-        # 全连接层导致缺少图像小范围特征
-        x = torch.nn.functional.relu(self.l1(x))
-        x = torch.nn.functional.relu(self.l2(x))
-        x = torch.nn.functional.relu(self.l3(x))
-        x = torch.nn.functional.relu(self.l4(x))
-        return self.l5(x)
+    def forward(self,x):                                    # b*1*28*28
+        batch_size = x.size(0)
+        x = torch.nn.functional.relu(self.conv1(x))         # b*5*24*24
+        x = self.maxpool(x)                                 # b*5*12*12
+        x = torch.nn.functional.relu(self.conv2(x))         # b*10*10*10
+        x = torch.nn.functional.relu(self.conv3(x))         # b*20*8*8
+        x = self.maxpool(x)                                 # b*20*4*4
+        x = x.view(batch_size, -1)                          # b*320
+        x = torch.nn.functional.sigmoid(self.linear1(x))    # b*40
+        return self.linear2(x)                               # b*10
 
-model = Model()
+conv_model = Conv_Model()
 
-# ----------------------------------------------------------------optimizer and losss_fn
-optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-loss_fn = torch.nn.CrossEntropyLoss()       # softmax + NLLloss
+optimizer = torch.optim.SGD(params=conv_model.parameters(),lr=0.01)
+loss_fn = torch.nn.CrossEntropyLoss()
 
-# ----------------------------------------------------------------train
-# 将每一轮循环封装成函数
-def train(epoch):
-    running_loss = 0
+def train():
+    total_loss = 0
     for batch_idx, data in enumerate(train_loader,0):
-        inputs, targets = data
-        y_pred = model(inputs)
+        images,targets = data
+        images, targets = images.to(device),targets.to(device)
+        y_pred = conv_model(images)
         loss = loss_fn(y_pred, targets)
-        running_loss += loss.item()
-        # if batch_idx % 10 == 0:
-        #     print(f"batch_idx: {batch_idx}, loss: {loss}")
+        total_loss += loss.item()
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-    print(f"epoch: {epoch}, total_loss = {running_loss}")
-    return running_loss
+    print(f"epoch: {epoch}, loss: {total_loss}")
+    return total_loss
 
-# ----------------------------------------------------------------test
 def test():
+    acc = 0
     total = 0
-    correct = 0
-    with torch.no_grad():       # 接下来的代码不会在计算梯度
-        for data in test_loader:
+    for batch_idx, data in enumerate(test_loader,0):
+        with torch.no_grad():
             images, targets = data
-            y_pred = model(images)
-            _, predicted = torch.max(y_pred.data, dim=-1)       # _ 取到的最大值的值, predicted表示取到最大值的下标
+            images, targets = images.to(device), targets.to(device)
+            y_pred = conv_model(images)
+            _, pred = torch.max(y_pred.data,dim=-1)
             total += targets.size(0)
-            correct += (predicted == targets).sum().item()
-    print(f"total: {total}, correct: {correct}, acc: {correct / total}")
-    return correct / total
+            acc += (pred == targets).sum().item()
+    print(f"epoch: {epoch}, acc: {acc}, total: {total}, acc_rate: {acc/total}")
+    return acc/total
 
-
-
-# ----------------------------------------------------------------other_params
 max_acc = 0
 early_count = 0
+epochs_li = []
 total_loss_li = []
 acc_li = []
-epochs_li = []
-# ----------------------------------------------------------------main
+
+
+conv_model.to(device)
+
 if __name__ == "__main__":
     for epoch in range(epochs):
-        total_loss = train(epoch)
-        acc = test()
+        loss = train()
+        acc_rate = test()
 
-        total_loss_li.append(total_loss)
-        acc_li.append(acc)
+        total_loss_li.append(loss)
+        acc_li.append(acc_rate)
         epochs_li.append(epoch)
 
-        # save model
-        if acc > max_acc:
-            max_acc = acc
+        if acc_rate > max_acc:
+            max_acc = acc_rate
+            torch.save(conv_model.state_dict(),save_path)
+            print("saving model")
             early_count = 0
-            print(f"epoch: {epoch}, now acc: {acc}, save_best_model: {save_path}")
-            torch.save(model.state_dict(),save_path)
         else:
             early_count += 1
-            print(f"epoch: {epoch}, early_count: {early_count}, now acc: {acc}, max_acc: {max_acc}")
-        if early_count > patience or epoch == epochs - 1:       # 训练结束
-            save_plt(epochs_li, total_loss_li, "epoch", "total_loss", "loss with epoch", "./plt/minst_loss_.png")
-            save_plt(epochs_li, acc_li, "epoch", "acc", "acc with epoch", "./plt/minst_acc_.png")
+
+        save_plt(epochs_li, total_loss_li, "epoch", "total_loss", "loss with epoch", "./plt/minst_loss8_.png")
+        save_plt(epochs_li, acc_li, "epoch", "acc", "acc with epoch", "./plt/minst_acc8_.png")
+
+        if early_count >= patience or epoch == epochs - 1:
+            print("early stopping, train over")
             break
